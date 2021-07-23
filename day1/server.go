@@ -7,7 +7,20 @@ import (
 	"log"
 	"net"
 	"reflect"
+	"sync"
 )
+
+/**
+* 几个重点：
+* 1. json.Decoder.decode()的时候，允许有其他类型的数据。
+* 2. 锁：数据发送的时候需要上锁，否则会有杂糅的可能性（同时还得考虑同步+异步的场景，Line93/Line98）。
+* 3. reflect
+ */
+
+type request struct {
+	h            *codec.Header // header of request
+	argv, replyv reflect.Value // argv and replyv of request
+}
 
 const MagicNumber = 0x3bef5c
 
@@ -41,6 +54,7 @@ func (server *Server) Accept(lis net.Listener) {
 			log.Println("rpc server: accept error:", err)
 			return
 		}
+		// 每个connection使用一个goroutine来handle
 		go server.ServeConn(conn)
 	}
 }
@@ -68,35 +82,52 @@ func (server *Server) ServeConn(conn io.ReadWriteCloser) {
 	server.serveCodec(f(conn))
 }
 
-func (server *Server) serveCodec(cc codec.Codec) {
+// invalidRequest is a placeholder for response argv when error occurs
+var invalidRequest = struct{}{}
 
+func (server *Server) serveCodec(cc codec.Codec) {
+	sending := new(sync.Mutex)
+	wg := new(sync.WaitGroup)
+
+	// 多个请求体会出现在一个request里面，所以需要轮询
 	for {
 		// readRequest
 		req, err := server.readRequest(cc)
 		if err != nil {
 			// sendResponse
-			server.sendResponse()
+			// 因为handleRequest是异步的，跟这个方法会有同步发出的可能，所以得上锁。
+			server.sendResponse(cc, req.h, invalidRequest, sending)
 		}
 
-		// handleRequest
-		go server.handleRequest()
+		// handleRequest - 如果不使用goroutine，请求会串行执行。
+		// 需要使用锁，否则消息会杂糅在一起
+		go server.handleRequest(cc, req, sending, wg)
 	}
+}
 
+func (server *Server) readRequestHeader(cc codec.Codec) (*codec.Header, error) {
+	var h codec.Header
+	if err := cc.ReadHeader(&h); err != nil {
+		if err != io.EOF && err != io.ErrUnexpectedEOF {
+			log.Println("rpc server: read header error:", err)
+		}
+		return nil, err
+	}
+	return &h, nil
 }
 
 func (server *Server) readRequest(cc codec.Codec) (*request, error) {
 	return nil, nil
 }
 
-func (server *Server) sendResponse(cc codec.Codec, h *codec.Header, body interface{}) {
+func (server *Server) sendResponse(cc codec.Codec, h *codec.Header, body interface{}, locker *sync.Mutex) {
+	locker.Lock()
 
+	locker.Unlock()
 }
 
-func (server *Server) handleRequest() {
+func (server *Server) handleRequest(cc codec.Codec, req *request, locker *sync.Mutex, wg *sync.WaitGroup) {
+	locker.Lock()
 
-}
-
-type request struct {
-	h            *codec.Header // header of request
-	argv, replyv reflect.Value // argv and replyv of request
+	locker.Unlock()
 }
